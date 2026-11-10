@@ -99,9 +99,10 @@ with one of them switches automatically to the corresponding `wms-time-*` source
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--summer` | off | select a summer flight (June–August) |
+| `--season NAME` | `summer` for date-aware sources | campaign season: `spring`, `summer`, `autumn`, `winter` or `all` |
+| `--summer` | off | shorthand for `--season summer` |
 | `--time YYYY-MM-DD` | — | request an exact acquisition date |
-| `--months 6-8` | `6-8` | accepted acquisition months; accepts `5,7,9` or `4-9` |
+| `--months 5,7,9` | — | explicit month list; overrides `--season` |
 | `--prefer newest\|sharpest` | `newest` | newest flight within the season, or finest ground sample distance |
 | `--min-gsd METRES` | — | discard flights coarser than this value |
 | `--years 2018-2026` | `2018-2026` | years queried in the WFS index |
@@ -112,7 +113,8 @@ with one of them switches automatically to the corresponding `wms-time-*` source
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--tile PX` | `640` | tile side in pixels |
-| `--gsd METRES` | `0.25` | ground sample distance; tile footprint is `tile × gsd` |
+| `--tile-size LENGTH` | `tile × gsd` (160 m) | tile footprint on the ground: `160`, `160m` or `0.5km` |
+| `--gsd METRES` | `0.25` | ground sample distance; footprint is `tile × gsd` when `--tile-size` is not used |
 | `--overlap 0..0.9` | `0.0` | tile overlap; 0.1–0.2 is useful when objects fall on tile edges |
 | `--format png\|jpg` | `png` | image format; PNG writes `.pgw`, JPG writes `.jgw` |
 | `--mosaic` | off | additionally write `preview.jpg` for the whole area |
@@ -151,6 +153,7 @@ data/area/
   "crs": "EPSG:2180",
   "gsd": 0.25,
   "tile_px": 640,
+  "tile_size_m": 160.0,
   "n_tiles": 49,
   "n_blank": 0,
   "sheets": [{"sheet_id": "N-34-139-C-a-4-4", "date": "2024-07-18", "gsd": 0.25,
@@ -164,7 +167,16 @@ radiometrically consistent: more than one date means a sheet boundary crosses th
 
 ## Choosing parameters
 
-Tile footprint is `--tile × --gsd`, and the tile count grows with the square of the area:
+Tile footprint is `--tile × --gsd`. If you prefer to think in ground units, pass
+`--tile-size` instead — it converts to pixels using `--gsd`, so the resolution stays fixed:
+
+```bash
+# 500 m tiles, still at 25 cm/pixel -> 2000 x 2000 px per tile
+python geoportal.py --center 52.085 21.115 --size 2000 --source opendata \
+    --tile-size 0.5km --out data/big-tiles --mosaic
+```
+
+The tile count grows with the square of the area:
 
 | Area (`--size`) | `--tile 640`, `--gsd 0.25` (160 m) | `--tile 1024`, `--gsd 0.25` (256 m) |
 | --- | --- | --- |
@@ -213,7 +225,7 @@ Imagery requires attribution, and bulk downloading conflicts with its terms of u
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Every tile is `blank=1` | no data for the requested date | `--list-flights`; check `in_season` in `meta.json` |
-| Tiles are spring imagery despite `--summer` | the selected date is outside the season | use `--time YYYY-MM-DD`, or narrow `--months` |
+| Tiles are spring imagery despite `--season` | no flight exists in that season for some sheets | the run prints a `note:` line; check `tile_dates` in `meta.json` |
 | `Too many tiles (N > 500)` | area too large for the grid | reduce `--size`, increase `--tile` or `--gsd`, or raise `--max-tiles` |
 | Empty tiles from `wms-time-*` | the archive returns blank images intermittently | increase `--retries`, reduce `--workers`, or switch to `--source opendata` |
 | `OSError: decoder error` on a sheet | truncated download | delete the file from the cache and rerun |

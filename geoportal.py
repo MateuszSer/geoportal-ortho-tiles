@@ -545,6 +545,16 @@ def is_blank(image, threshold=0.98):
     return white > threshold or black > threshold
 
 
+def parse_length(spec):
+    """Parse a length with an optional unit: ``160``, ``160m``, ``0.5km`` -> metres."""
+    text = str(spec).strip().lower().replace(" ", "")
+    if text.endswith("km"):
+        return float(text[:-2]) * 1000.0
+    if text.endswith("m"):
+        return float(text[:-1])
+    return float(text)
+
+
 def parse_span(spec, default):
     """``"6-8"`` -> (6, 7, 8); ``"5,7,9"`` -> (5, 7, 9); empty -> default."""
     if not spec:
@@ -618,6 +628,9 @@ def main():
                         help="output ground sample distance in metres (default: 0.25)")
     parser.add_argument("--tile", type=int, default=640,
                         help="tile side in pixels (default: 640)")
+    parser.add_argument("--tile-size", default=None,
+                        help="tile footprint on the ground, e.g. 160, 500, 0.5km "
+                             "(default: tile x gsd = 160 m)")
     parser.add_argument("--overlap", type=float, default=0.0,
                         help="tile overlap, 0..0.9 (default: 0.0)")
     parser.add_argument("--format", choices=["png", "jpg"], default="png",
@@ -627,12 +640,17 @@ def main():
     parser.add_argument("--max-tiles", type=int, default=500,
                         help="abort above this tile count (default: 500)")
 
+    parser.add_argument("--season", choices=["spring", "summer", "autumn", "winter", "all"],
+                        default=None,
+                        help="season of the flight to select (default: summer for date-aware "
+                             "sources); 'all' accepts any month")
     parser.add_argument("--summer", action="store_true",
-                        help="select a summer flight (June-August)")
+                        help="shorthand for --season summer")
     parser.add_argument("--time", default=None,
                         help="explicit acquisition date, e.g. 2024-07-18")
-    parser.add_argument("--months", default="6-8",
-                        help="accepted acquisition months for --summer (default: 6-8)")
+    parser.add_argument("--months", default=None,
+                        help="explicit accepted months, e.g. 6-8 or 5,7,9 "
+                             "(overrides --season)")
     parser.add_argument("--prefer", choices=["newest", "sharpest"], default="newest",
                         help="newest flight in season, or finest pixel (default: newest)")
     parser.add_argument("--min-gsd", type=float, default=None,
@@ -667,15 +685,33 @@ def main():
     if not 0 <= args.overlap < 0.9:
         parser.error("--overlap must be in the range [0, 0.9)")
 
-    months = parse_span(args.months, (6, 7, 8))
+    season = args.season or ("summer" if args.summer else None)
+    if args.months:
+        months = parse_span(args.months, (6, 7, 8))
+    elif season == "all":
+        months = tuple(range(1, 13))
+    elif season:
+        months = tuple(ortho_index.SEASONS[season])
+    else:
+        months = (6, 7, 8)
+
     years = parse_span(args.years, range(2018, 2027)) if args.years else range(2018, 2027)
+
+    # Tile footprint: either given on the ground (--tile-size) or in pixels (--tile).
+    if args.tile_size:
+        requested_m = parse_length(args.tile_size)
+        tile_px = max(64, int(round(requested_m / args.gsd)))
+    else:
+        tile_px = args.tile
+    tile_m = tile_px * args.gsd
 
     kind, url = SOURCES[args.source][:2]
     default_layer = SOURCES[args.source][2] if len(SOURCES[args.source]) > 2 else None
 
     # WMTS and the plain WMS mosaics have no time axis; --summer/--time switch
     # to the time-enabled archive so that a date can actually be requested.
-    if (args.summer or args.time) and kind in ("wmts", "wms"):
+    needs_date = bool(args.time or (season and season != "all"))
+    if needs_date and kind in ("wmts", "wms"):
         replacement = "wms-time-high" if args.source in ("wmts-high", "wms-high") \
             else "wms-time-std"
         print(f"{args.source} has no time axis; using {replacement}")
@@ -723,7 +759,7 @@ def main():
         else:
             args.layer = args.layer or wms_layers(url)[-1][0]
 
-    tiles, n_rows, n_cols, stride = make_grid(area_bbox, args.tile, args.gsd, args.overlap)
+    tiles, n_rows, n_cols, stride = make_grid(area_bbox, tile_px, args.gsd, args.overlap)
 
     print(f"Source: {args.source} ({url})")
     if wmts:
@@ -742,8 +778,17 @@ def main():
         listed = ", ".join(f"{date} ({gsd:.2f} m)" for date, gsd in used[:6])
         print(f"Selected flights: {len(used)} -> {listed}{' ...' if len(used) > 6 else ''}")
 
-    print(f"Tile: {args.tile}px x {args.gsd} m = {args.tile * args.gsd:.0f} m, "
-          f"stride {stride:.0f} m")
+        out_of_season = [sheet for sheet in chosen.values()
+                         if sheet.date and sheet.date.month not in months]
+        if out_of_season:
+            print(f"  note: {len(out_of_season)} sheet(s) have no flight in months "
+                  f"{list(months)}; the newest available is used instead")
+
+    footprint = (f"{tile_m / 1000:.2f} km" if tile_m >= 1000 else f"{tile_m:.0f} m")
+    print(f"Tile: {tile_px}px x {args.gsd} m = {footprint}, stride {stride:.0f} m")
+    if tile_px > 2048 and kind in ("wmts", "wms", "wms-time"):
+        print(f"  note: {tile_px}px tiles are large for WMS sources; "
+              f"consider a coarser --gsd or --source opendata")
     print(f"Grid: {n_rows} x {n_cols} = {len(tiles)} tiles")
 
     if len(tiles) > args.max_tiles:
@@ -759,8 +804,8 @@ def main():
     records, features = [], []
     mosaic = None
     if args.mosaic:
-        mosaic_width = int(round((n_cols - 1) * stride / args.gsd)) + args.tile
-        mosaic_height = int(round((n_rows - 1) * stride / args.gsd)) + args.tile
+        mosaic_width = int(round((n_cols - 1) * stride / args.gsd)) + tile_px
+        mosaic_height = int(round((n_rows - 1) * stride / args.gsd)) + tile_px
         mosaic = Image.new("RGB", (mosaic_width, mosaic_height), (255, 255, 255))
 
     tif_cache = {}
@@ -800,16 +845,16 @@ def main():
     def fetch(bbox):
         """Return (image, acquisition_date) for one tile."""
         if wmts:
-            return wmts.render(bbox, args.tile, matrix), None
+            return wmts.render(bbox, tile_px, matrix), None
         if kind == "esri":
-            return esri_get_map(url, bbox, args.tile), None
+            return esri_get_map(url, bbox, tile_px), None
         if kind == "tif":
             sheet = sheet_for(bbox, chosen, months)
             if sheet is None or not sheet.url:
-                return Image.new("RGB", (args.tile, args.tile), (255, 255, 255)), None
+                return Image.new("RGB", (tile_px, tile_px), (255, 255, 255)), None
             tif = get_tif(sheet)
             date = sheet.date.isoformat() if sheet.date else None
-            return tif.crop(bbox, args.tile, args.gsd), date
+            return tif.crop(bbox, tile_px, args.gsd), date
 
         fmt = "image/png" if args.format == "png" else "image/jpeg"
         # Preference order: explicit date, the covering sheet's date, current mosaic.
@@ -830,7 +875,7 @@ def main():
         best = None
         for date in candidates:
             for attempt in range(max(1, args.retries)):
-                image = wms_get_map(url, args.layer, bbox, args.tile, fmt, date=date)
+                image = wms_get_map(url, args.layer, bbox, tile_px, fmt, date=date)
                 if not is_blank(image):
                     return image, date
                 best = (image, date)
@@ -922,7 +967,8 @@ def main():
         "layer": wmts.layer if wmts else args.layer,
         "crs": CRS,
         "gsd": args.gsd,
-        "tile_px": args.tile,
+        "tile_px": tile_px,
+        "tile_size_m": round(tile_m, 3),
         "overlap": args.overlap,
         "area_bbox": area_bbox,
         "n_tiles": len(tiles),
@@ -940,7 +986,8 @@ def main():
             histogram[record["date"]] = histogram.get(record["date"], 0) + 1
         meta.update({
             "time": args.time,
-            "summer": args.summer,
+            "season": season,
+            "summer": bool(season == "summer"),
             "months": list(months),
             "sheets": sheets_meta(chosen, months),
             "tile_dates": histogram,
