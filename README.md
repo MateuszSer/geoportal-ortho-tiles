@@ -236,6 +236,10 @@ Imagery requires attribution, and bulk downloading conflicts with its terms of u
 
 - 5 cm imagery is only available from spring campaigns; summer flights are typically 25 cm.
   A 25 cm mosaic still resolves a domestic pool (8 × 4 m) as roughly 32 × 16 pixels.
+- Winter imagery does not exist in the national product: campaigns run roughly April to
+  October, and the only index entry falling in December–February is a 2007 sheet carrying a
+  year-only placeholder date (`2007-01-01`) whose scene is summer. `--season winter` and
+  `--season autumn` work, but they will fall back and print a note when no such flight exists.
 - A mosaic is not guaranteed to come from a single date. Sheets are selected independently,
   and `tile_dates` reports the result.
 - The time-enabled WMS archive is convenient but unreliable; the GeoTIFF path is preferred
