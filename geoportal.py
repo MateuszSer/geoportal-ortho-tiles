@@ -732,16 +732,23 @@ def main():
         print(f"Reading flight index (WFS), years {min(years)}-{max(years)} ... ",
               end="", flush=True)
         sheets = ortho_index.fetch_sheets(area_bbox, years=years)
+
+        # An explicit date overrides the season: narrow the index to that campaign
+        # first, so the selection printed below is what the tiles will actually use.
+        if args.time:
+            exact = [sheet for sheet in sheets
+                     if sheet.date and sheet.date.isoformat() == args.time]
+            if exact:
+                sheets = exact
+                months = tuple(range(1, 13))
+            else:
+                print(f"  warning: no indexed sheet dated {args.time}; "
+                      f"falling back to the season selection")
+
         chosen = ortho_index.pick_dates(
             sheets, area_bbox, months=months, prefer=args.prefer, min_gsd=args.min_gsd
         )
         print(f"{len(sheets)} sheets, {len(chosen)} selected")
-
-        if args.time:
-            matching = {sid: sheet for sid, sheet in chosen.items()
-                        if sheet.date and sheet.date.isoformat() == args.time}
-            if matching:
-                chosen = matching
 
         if args.list_flights:
             print_sheets(sheets, chosen, months)
@@ -914,9 +921,22 @@ def main():
                       end="", flush=True)
         print()
 
+    # Dates of tiles written by an earlier run, so a resumed run keeps its metadata.
+    previous_dates = {}
+    if kind in ("wms-time", "tif") and (args.out / "tiles.csv").exists():
+        try:
+            with open(args.out / "tiles.csv", newline="") as handle:
+                for row_ in csv.DictReader(handle):
+                    if row_.get("date"):
+                        previous_dates[row_["name"]] = row_["date"]
+        except (OSError, csv.Error):
+            previous_dates = {}
+
     for index, (row, col, bbox) in enumerate(tiles, 1):
         path = image_dir / f"tile_r{row:03d}_c{col:03d}.{args.format}"
         date, blank = tile_dates.get((row, col), (None, None))
+        if date is None:
+            date = previous_dates.get(path.name) or args.time or pick_tile_date(bbox, chosen, months)
         image = Image.open(path).convert("RGB")
         if blank is None:
             blank = is_blank(image)
